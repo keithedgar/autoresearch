@@ -1,16 +1,29 @@
 """
-Autoresearch Orchestrator — drives autonomous experiment loops via local LLM.
+Autoresearch Orchestrator — batch-mode autonomous experiment runner.
 
-Calls the local Nemotron model (via vLLM) to propose train.py modifications,
-runs experiments, tracks results, and keeps/discards changes via git.
+Designed to run as a **nightly batch job**, NOT a continuous daemon.
+Each invocation runs a bounded number of experiments (default 12 ≈ 1 hour),
+persists all state to ``state.json``, then exits cleanly.
+
+State file (``state.json``) tracks:
+    - Current branch / tag
+    - Cumulative experiment counter (across nightly runs)
+    - Consecutive failure counter (survives restarts)
+    - Best val_bpb achieved
+    - Timestamps of each nightly run
+
+The next invocation resumes exactly where the previous one left off.
 
 Usage:
-    Inside crsai-pytorch container:
-        AUTORESEARCH_PROFILE=rtx5060 python3 orchestrator.py --tag apr8
+    # Nightly cron / systemd timer (inside crsai-pytorch container):
+    AUTORESEARCH_PROFILE=rtx5060 python3 orchestrator.py --tag apr
 
-    Or from host via docker exec:
-        docker exec -w /workspace/autoresearch crsai-pytorch \
-            env AUTORESEARCH_PROFILE=rtx5060 python3 orchestrator.py --tag apr8
+    # Or from host:
+    docker exec -w /workspace/autoresearch crsai-pytorch \\
+        env AUTORESEARCH_PROFILE=rtx5060 python3 orchestrator.py --tag apr
+
+    # Override batch size (default 12 experiments ≈ 1 hour):
+    python3 orchestrator.py --tag apr --batch-size 6
 """
 
 import argparse
@@ -20,7 +33,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -28,11 +41,55 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 LLM_URL = os.getenv("LLM_URL", "http://crsai-vllm:8000/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "primary")
+LLM_MODEL = os.getenv("LLM_MODEL", "nemotron-cascade-2-nvfp4")
 MAX_EXPERIMENT_SECONDS = 600  # kill if > 10 min
 TRAIN_CMD = "python3 train.py"
 RESULTS_FILE = "results.tsv"
 RUN_LOG = "run.log"
+STATE_FILE = "state.json"
+DEFAULT_BATCH_SIZE = 12  # ~1 hour at 5 min/experiment
+MAX_CONSECUTIVE_FAILURES = 3
+
+# ---------------------------------------------------------------------------
+# Persistent state
+# ---------------------------------------------------------------------------
+
+
+def _empty_state() -> dict:
+    """Return a fresh state dict with defaults."""
+    return {
+        "tag": None,
+        "branch": None,
+        "total_experiments": 0,
+        "consecutive_failures": 0,
+        "best_val_bpb": None,
+        "runs": [],  # list of {date, batch_size, experiments_run, best_bpb_after}
+    }
+
+
+def load_state() -> dict:
+    """Load persisted state from STATE_FILE, or return defaults."""
+    path = Path(STATE_FILE)
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return _empty_state()
+
+
+def save_state(state: dict) -> None:
+    """Atomically persist state to STATE_FILE."""
+    tmp = Path(STATE_FILE + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2, default=str))
+    tmp.rename(STATE_FILE)
+
+
+def log(msg: str) -> None:
+    """Timestamped log line."""
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -128,6 +185,24 @@ def best_val_bpb() -> float | None:
 # ---------------------------------------------------------------------------
 # LLM interaction
 # ---------------------------------------------------------------------------
+
+
+def check_vllm_ready(retries: int = 3, delay: int = 10) -> bool:
+    """Verify vLLM is reachable before starting the experiment loop."""
+    import requests
+
+    url = f"{LLM_URL}/models"
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            log(f"vLLM health check passed (attempt {attempt})")
+            return True
+        except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as exc:
+            log(f"vLLM not ready (attempt {attempt}/{retries}): {exc}")
+            if attempt < retries:
+                time.sleep(delay)
+    return False
 
 
 def call_llm(system: str, user: str, max_tokens: int = 4096) -> str:
@@ -262,112 +337,153 @@ def run_experiment() -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Autoresearch orchestrator")
-    parser.add_argument("--tag", required=True, help="Experiment run tag (e.g. apr8)")
-    parser.add_argument("--max-experiments", type=int, default=0,
-                        help="Max experiments to run (0 = infinite)")
+    parser = argparse.ArgumentParser(
+        description="Autoresearch orchestrator (batch mode — run N experiments then exit)")
+    parser.add_argument("--tag", required=True,
+                        help="Experiment run tag (e.g. apr). Branch = autoresearch/<tag>")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                        help=f"Experiments to run this invocation (default {DEFAULT_BATCH_SIZE})")
     parser.add_argument("--baseline-only", action="store_true",
                         help="Run only the baseline, then exit")
     args = parser.parse_args()
 
+    # ------------------------------------------------------------------
+    # Load / initialise persistent state
+    # ------------------------------------------------------------------
+    state = load_state()
     branch = f"autoresearch/{args.tag}"
-    print(f"=== Autoresearch Orchestrator ===", flush=True)
-    print(f"Branch: {branch}", flush=True)
-    print(f"LLM: {LLM_URL} / {LLM_MODEL}", flush=True)
-    print(f"Profile: {os.getenv('AUTORESEARCH_PROFILE', 'default')}", flush=True)
-    print(flush=True)
+    run_start = datetime.now(timezone.utc).isoformat()
 
+    # If tag changed, reset state for the new research track
+    if state["tag"] != args.tag:
+        log(f"New tag '{args.tag}' (previous: {state['tag']}). Resetting state.")
+        state = _empty_state()
+        state["tag"] = args.tag
+        state["branch"] = branch
+
+    log("=== Autoresearch Orchestrator (batch) ===")
+    log(f"Branch: {branch}")
+    log(f"LLM: {LLM_URL} / {LLM_MODEL}")
+    log(f"Profile: {os.getenv('AUTORESEARCH_PROFILE', 'default')}")
+    log(f"Batch size: {args.batch_size}")
+    log(f"Cumulative experiments so far: {state['total_experiments']}")
+    log(f"Consecutive failures carried over: {state['consecutive_failures']}")
+
+    # ------------------------------------------------------------------
+    # Preflight: ensure vLLM is reachable
+    # ------------------------------------------------------------------
+    if not check_vllm_ready():
+        log("FATAL: vLLM is not reachable at " + LLM_URL)
+        log("Start it first: docker ps --filter name=crsai-vllm")
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
     # Setup branch
+    # ------------------------------------------------------------------
     r = run(f"git rev-parse --verify {branch}")
     if r.returncode != 0:
         run(f"git checkout -b {branch}")
-        print(f"Created branch: {branch}", flush=True)
+        log(f"Created branch: {branch}")
     else:
         run(f"git checkout {branch}")
-        print(f"Checked out existing branch: {branch}", flush=True)
+        log(f"Checked out existing branch: {branch}")
 
     init_results_tsv()
 
-    # Baseline run
+    # ------------------------------------------------------------------
+    # Baseline (only needed on first-ever run)
+    # ------------------------------------------------------------------
     if best_val_bpb() is None:
-        print("\n--- Baseline Run ---", flush=True)
+        log("--- Baseline Run ---")
         result = run_experiment()
         commit = git_short_hash()
         if result["crashed"]:
-            print("  BASELINE CRASHED — check run.log", flush=True)
+            log("BASELINE CRASHED — check run.log")
             append_result(commit, 0.0, 0.0, "crash", "baseline")
+            state["consecutive_failures"] += 1
+            save_state(state)
             sys.exit(1)
 
         bpb = result["val_bpb"]
         mem = result["peak_vram_mb"] / 1024 if result["peak_vram_mb"] else 0
         append_result(commit, bpb, mem, "keep", "baseline")
-        print(f"  Baseline: val_bpb={bpb:.6f}, memory={mem:.1f}GB", flush=True)
+        state["best_val_bpb"] = bpb
+        save_state(state)
+        log(f"Baseline: val_bpb={bpb:.6f}, memory={mem:.1f}GB")
 
     if args.baseline_only:
-        print("\nBaseline complete. Exiting.", flush=True)
+        log("Baseline complete. Exiting.")
+        save_state(state)
         return
 
-    # Experiment loop
-    experiment_num = 0
-    consecutive_failures = 0
-    MAX_CONSECUTIVE_FAILURES = 3
-    while True:
-        experiment_num += 1
-        if args.max_experiments and experiment_num > args.max_experiments:
-            print(f"\nReached max experiments ({args.max_experiments}). Stopping.", flush=True)
+    # ------------------------------------------------------------------
+    # Bounded experiment loop
+    # ------------------------------------------------------------------
+    batch_experiments = 0
+
+    for _ in range(args.batch_size):
+        # Abort on too many consecutive failures (persisted across runs)
+        if state["consecutive_failures"] >= MAX_CONSECUTIVE_FAILURES:
+            log(f"{MAX_CONSECUTIVE_FAILURES} consecutive failures (across runs). "
+                "Resetting failure counter for next nightly run.")
+            state["consecutive_failures"] = 0
+            save_state(state)
             break
 
-        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-            print(f"\n{MAX_CONSECUTIVE_FAILURES} consecutive LLM failures. Stopping.", flush=True)
-            break
+        state["total_experiments"] += 1
+        batch_experiments += 1
+        exp_id = state["total_experiments"]
 
         current_best = best_val_bpb()
-        print(f"\n--- Experiment {experiment_num} (best so far: {current_best:.6f}) ---", flush=True)
+        log(f"--- Experiment {exp_id} [{batch_experiments}/{args.batch_size}] "
+            f"(best: {current_best:.6f}) ---")
 
-        # Get current state
         train_py = read_train_py()
         results_history = read_results()
 
-        # Ask LLM for proposal
+        # --- Propose ---
         try:
-            print("  Querying LLM for proposal...", flush=True)
+            log("Querying LLM for proposal...")
             proposal = propose_experiment(train_py, results_history)
             description = proposal.get("description", "unknown modification")
             replacements = proposal.get("replacements", [])
 
             if not replacements:
-                print("  LLM returned no replacements, skipping", flush=True)
+                log("LLM returned no replacements, skipping")
+                state["consecutive_failures"] += 1
+                save_state(state)
                 continue
 
-            print(f"  Proposal: {description}", flush=True)
-            print(f"  Replacements: {len(replacements)}", flush=True)
+            log(f"Proposal: {description}")
+            log(f"Replacements: {len(replacements)}")
         except Exception as e:
-            print(f"  LLM error: {e}", flush=True)
-            print("  Retrying in 30s...", flush=True)
-            consecutive_failures += 1
+            log(f"LLM error: {e}")
+            state["consecutive_failures"] += 1
+            save_state(state)
             time.sleep(30)
             continue
 
-        # Apply modification
+        # --- Apply ---
         try:
             new_train_py = apply_replacements(train_py, replacements)
             write_train_py(new_train_py)
         except ValueError as e:
-            print(f"  Replacement failed: {e}", flush=True)
-            consecutive_failures += 1
+            log(f"Replacement failed: {e}")
+            state["consecutive_failures"] += 1
+            save_state(state)
             continue
 
-        consecutive_failures = 0  # reset on successful proposal + apply
-        commit = git_commit(f"exp{experiment_num}: {description[:60]}")
+        state["consecutive_failures"] = 0
+        commit = git_commit(f"exp{exp_id}: {description[:60]}")
 
-        # Run experiment
+        # --- Train ---
         result = run_experiment()
 
         if result["crashed"]:
-            mem = 0.0
-            append_result(commit, 0.0, mem, "crash", description)
-            print(f"  CRASHED — reverting", flush=True)
+            append_result(commit, 0.0, 0.0, "crash", description)
+            log("CRASHED — reverting")
             git_reset_hard()
+            save_state(state)
             continue
 
         bpb = result["val_bpb"]
@@ -376,18 +492,36 @@ def main():
         if bpb < current_best:
             append_result(commit, bpb, mem, "keep", description)
             improvement = current_best - bpb
-            print(f"  KEEP — val_bpb={bpb:.6f} (improved by {improvement:.6f})", flush=True)
+            state["best_val_bpb"] = bpb
+            log(f"KEEP — val_bpb={bpb:.6f} (improved by {improvement:.6f})")
         else:
             append_result(commit, bpb, mem, "discard", description)
             regression = bpb - current_best
-            print(f"  DISCARD — val_bpb={bpb:.6f} (worse by {regression:.6f})", flush=True)
+            log(f"DISCARD — val_bpb={bpb:.6f} (worse by {regression:.6f})")
             git_reset_hard()
 
-    # Summary
-    print(f"\n=== Summary ===", flush=True)
-    print(f"Total experiments: {experiment_num}", flush=True)
-    print(f"Best val_bpb: {best_val_bpb():.6f}", flush=True)
-    print(f"Results: {RESULTS_FILE}", flush=True)
+        # Persist after every experiment so a crash mid-batch loses at most 1
+        save_state(state)
+
+    # ------------------------------------------------------------------
+    # End-of-batch bookkeeping
+    # ------------------------------------------------------------------
+    run_record = {
+        "date": run_start,
+        "batch_size": args.batch_size,
+        "experiments_run": batch_experiments,
+        "best_bpb_after": best_val_bpb(),
+    }
+    state["runs"].append(run_record)
+    save_state(state)
+
+    log("")
+    log("=== Nightly Batch Summary ===")
+    log(f"Experiments this run: {batch_experiments}")
+    log(f"Cumulative experiments: {state['total_experiments']}")
+    log(f"Best val_bpb: {best_val_bpb():.6f}")
+    log(f"State persisted to: {STATE_FILE}")
+    log(f"Results: {RESULTS_FILE}")
 
 
 if __name__ == "__main__":

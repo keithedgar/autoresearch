@@ -21,3 +21,11 @@ dev/
 
 # Results file
 results.tsv
+
+# Runtime state and generated logs
+logs/
+reports/
+run.log
+orchestrator.log
+state.json
+current_directive.json
