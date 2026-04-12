@@ -205,7 +205,7 @@ def check_vllm_ready(retries: int = 3, delay: int = 10) -> bool:
     return False
 
 
-def call_llm(system: str, user: str, max_tokens: int = 4096) -> str:
+def call_llm(system: str, user: str, max_tokens: int = 8192) -> str:
     """Call local vLLM endpoint. Uses requests (already installed)."""
     import requests
 
@@ -219,8 +219,9 @@ def call_llm(system: str, user: str, max_tokens: int = 4096) -> str:
             ],
             "temperature": 0.3,
             "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
         },
-        timeout=180,
+        timeout=300,
     )
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]
@@ -281,12 +282,19 @@ Current best val_bpb: {best_val_bpb() or 'no results yet — this is the first r
 Propose a single focused modification to improve val_bpb.
 Return search-and-replace pairs (exact text from the file) and a description."""
 
-    response = call_llm(SYSTEM_PROMPT, user_msg, max_tokens=4096)
+    response = call_llm(SYSTEM_PROMPT, user_msg, max_tokens=8192)
 
     # Strip thinking tags (reasoning model outputs <think>...</think> before JSON)
     response = re.sub(r"<think>[\s\S]*?</think>", "", response).strip()
     # If <think> started but never closed, strip everything before the first {
     if "<think>" in response:
+        idx = response.find("{")
+        if idx >= 0:
+            response = response[idx:]
+
+    # If response starts with non-JSON text (reasoning without tags), find first {
+    stripped = response.lstrip()
+    if stripped and stripped[0] != "{":
         idx = response.find("{")
         if idx >= 0:
             response = response[idx:]
@@ -301,7 +309,10 @@ Return search-and-replace pairs (exact text from the file) and a description."""
         # Try to extract JSON from response
         match = re.search(r'\{[\s\S]*\}', response)
         if match:
-            return json.loads(match.group())
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
         raise ValueError(f"Could not parse LLM response as JSON:\n{response[:500]}")
 
 

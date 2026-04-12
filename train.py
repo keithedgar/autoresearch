@@ -5,7 +5,7 @@ Usage: uv run train.py
 """
 
 import os
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:4096"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 import gc
@@ -16,6 +16,9 @@ from dataclasses import dataclass, asdict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# Cap VRAM to ~30% of GPU to coexist with vLLM on the 5090
+torch.cuda.set_per_process_memory_fraction(0.3)
 
 from kernels import get_kernel
 cap = torch.cuda.get_device_capability()

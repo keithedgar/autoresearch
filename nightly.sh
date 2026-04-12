@@ -22,7 +22,7 @@ set -euo pipefail
 TAG="${AUTORESEARCH_TAG:-apr}"
 BATCH_SIZE="${AUTORESEARCH_BATCH_SIZE:-12}"
 PROFILE="${AUTORESEARCH_PROFILE:-rtx5060}"
-GPU="${CUDA_VISIBLE_DEVICES:-1}"
+GPU="${CUDA_VISIBLE_DEVICES:-0}"
 LOG_DIR="${AUTORESEARCH_LOG_DIR:-/workspace/autoresearch/logs}"
 
 mkdir -p "$LOG_DIR"
@@ -48,6 +48,7 @@ cd /workspace/autoresearch
 
 export AUTORESEARCH_PROFILE="$PROFILE"
 export CUDA_VISIBLE_DEVICES="$GPU"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:4096"
 
 python3 -u orchestrator.py \
     --tag "$TAG" \
