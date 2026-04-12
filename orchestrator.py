@@ -49,6 +49,10 @@ RUN_LOG = "run.log"
 STATE_FILE = "state.json"
 DEFAULT_BATCH_SIZE = 12  # ~1 hour at 5 min/experiment
 MAX_CONSECUTIVE_FAILURES = 3
+RAG_RESERVATION_SCRIPT = os.getenv(
+    "AUTORESEARCH_RAG_RESERVATION_SCRIPT",
+    "/workspace/scripts/rag_gpu_reservation.sh",
+)
 
 # ---------------------------------------------------------------------------
 # Persistent state
@@ -89,6 +93,24 @@ def log(msg: str) -> None:
     """Timestamped log line."""
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
+
+
+def reserve_gpu_for_ml() -> None:
+    """Force MCP-RAG to CPU before starting a GPU-bound AutoResearch run."""
+    proc = subprocess.run(
+        ["bash", RAG_RESERVATION_SCRIPT, "cpu"],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if output:
+        log(output[-500:])
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"GPU reservation failed via {RAG_RESERVATION_SCRIPT}: {output[-2000:]}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +401,15 @@ def main():
     log(f"Batch size: {args.batch_size}")
     log(f"Cumulative experiments so far: {state['total_experiments']}")
     log(f"Consecutive failures carried over: {state['consecutive_failures']}")
+
+    # ------------------------------------------------------------------
+    # Reserve GPU 1 for AutoResearch before any training starts
+    # ------------------------------------------------------------------
+    try:
+        reserve_gpu_for_ml()
+    except Exception as exc:
+        log(f"FATAL: {exc}")
+        sys.exit(1)
 
     # ------------------------------------------------------------------
     # Preflight: ensure vLLM is reachable

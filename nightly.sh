@@ -24,6 +24,7 @@ BATCH_SIZE="${AUTORESEARCH_BATCH_SIZE:-12}"
 PROFILE="${AUTORESEARCH_PROFILE:-rtx5060}"
 GPU="${CUDA_VISIBLE_DEVICES:-0}"
 LOG_DIR="${AUTORESEARCH_LOG_DIR:-/workspace/autoresearch/logs}"
+RAG_RESERVATION_SCRIPT="${AUTORESEARCH_RAG_RESERVATION_SCRIPT:-/workspace/scripts/rag_gpu_reservation.sh}"
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/nightly-$(date -u +%Y%m%d-%H%M%S).log"
@@ -35,6 +36,12 @@ echo "Batch size: $BATCH_SIZE" | tee -a "$LOG_FILE"
 echo "Profile:    $PROFILE" | tee -a "$LOG_FILE"
 echo "GPU:        $GPU" | tee -a "$LOG_FILE"
 echo "" | tee -a "$LOG_FILE"
+
+if ! bash "$RAG_RESERVATION_SCRIPT" cpu 2>&1 | tee -a "$LOG_FILE"; then
+    echo "ERROR: failed to reserve GPU for AutoResearch via $RAG_RESERVATION_SCRIPT" | tee -a "$LOG_FILE"
+    exit 1
+fi
+echo "GPU reservation applied for AutoResearch" | tee -a "$LOG_FILE"
 
 # Verify vLLM is reachable before starting a potentially long batch
 LLM_URL="${LLM_URL:-http://crsai-vllm:8000/v1}"

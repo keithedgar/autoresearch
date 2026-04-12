@@ -43,6 +43,29 @@ _thread: threading.Thread | None = None
 
 RESULTS_FILE = "results.tsv"
 API_PORT = int(os.getenv("AUTORESEARCH_API_PORT", "8300"))
+RAG_RESERVATION_SCRIPT = os.getenv(
+    "AUTORESEARCH_RAG_RESERVATION_SCRIPT",
+    "/workspace/scripts/rag_gpu_reservation.sh",
+)
+
+
+def _reserve_gpu_for_ml() -> tuple[bool, str]:
+    """Force MCP-RAG to CPU before launching a GPU-bound ML run."""
+    try:
+        proc = subprocess.run(
+            ["bash", RAG_RESERVATION_SCRIPT, "cpu"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except Exception as exc:
+        return False, str(exc)
+
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return False, output.strip()
+    return True, output.strip()
 
 
 def _read_results_json() -> list[dict]:
@@ -206,6 +229,17 @@ class AutoresearchHandler(BaseHTTPRequestHandler):
             batch_size = int(body.get("batch_size", body.get("max_experiments", 12)))
             baseline_only = bool(body.get("baseline_only", False))
 
+            reserved, reservation_output = _reserve_gpu_for_ml()
+            if not reserved:
+                self._json_response(
+                    {
+                        "error": "gpu reservation failed",
+                        "detail": reservation_output[-2000:],
+                    },
+                    503,
+                )
+                return
+
             _stop_event.clear()
             _thread = threading.Thread(
                 target=_run_orchestrator,
@@ -213,7 +247,14 @@ class AutoresearchHandler(BaseHTTPRequestHandler):
                 daemon=True,
             )
             _thread.start()
-            self._json_response({"started": True, "tag": tag, "batch_size": batch_size})
+            self._json_response(
+                {
+                    "started": True,
+                    "tag": tag,
+                    "batch_size": batch_size,
+                    "reservation": reservation_output[-500:],
+                }
+            )
 
         elif path == "/stop":
             _stop_event.set()
@@ -231,6 +272,17 @@ class AutoresearchHandler(BaseHTTPRequestHandler):
             body = self._read_body()
             tag = body.get("tag", time.strftime("%b%d").lower())
 
+            reserved, reservation_output = _reserve_gpu_for_ml()
+            if not reserved:
+                self._json_response(
+                    {
+                        "error": "gpu reservation failed",
+                        "detail": reservation_output[-2000:],
+                    },
+                    503,
+                )
+                return
+
             _stop_event.clear()
             _thread = threading.Thread(
                 target=_run_orchestrator,
@@ -238,7 +290,14 @@ class AutoresearchHandler(BaseHTTPRequestHandler):
                 daemon=True,
             )
             _thread.start()
-            self._json_response({"started": True, "tag": tag, "baseline_only": True})
+            self._json_response(
+                {
+                    "started": True,
+                    "tag": tag,
+                    "baseline_only": True,
+                    "reservation": reservation_output[-500:],
+                }
+            )
 
         else:
             self._json_response({"error": "not found"}, 404)
