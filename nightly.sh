@@ -25,6 +25,9 @@ PROFILE="${AUTORESEARCH_PROFILE:-rtx5060}"
 GPU="${CUDA_VISIBLE_DEVICES:-0}"
 LOG_DIR="${AUTORESEARCH_LOG_DIR:-/workspace/autoresearch/logs}"
 RAG_RESERVATION_SCRIPT="${AUTORESEARCH_RAG_RESERVATION_SCRIPT:-/workspace/scripts/rag_gpu_reservation.sh}"
+VLLM_WAIT_TIMEOUT_SECS="${AUTORESEARCH_VLLM_WAIT_TIMEOUT_SECS:-600}"
+VLLM_RETRY_INTERVAL_SECS="${AUTORESEARCH_VLLM_RETRY_INTERVAL_SECS:-15}"
+VLLM_CONNECT_TIMEOUT_SECS="${AUTORESEARCH_VLLM_CONNECT_TIMEOUT_SECS:-10}"
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/nightly-$(date -u +%Y%m%d-%H%M%S).log"
@@ -51,12 +54,29 @@ else
     echo "GPU reservation applied for AutoResearch (shell-script mode)" | tee -a "$LOG_FILE"
 fi
 
-# Verify vLLM is reachable before starting a potentially long batch
+# Verify vLLM is reachable before starting a potentially long batch.
+# Give the service time to recover from brief restarts or model-load delays.
 LLM_URL="${LLM_URL:-http://crsai-vllm:8000/v1}"
-if ! curl -sf "${LLM_URL}/models" > /dev/null 2>&1; then
-    echo "ERROR: vLLM not reachable at ${LLM_URL}. Aborting." | tee -a "$LOG_FILE"
-    exit 1
-fi
+VLLM_DEADLINE=$(( $(date +%s) + VLLM_WAIT_TIMEOUT_SECS ))
+VLLM_ATTEMPT=1
+
+while true; do
+    if VLLM_HEALTH_ERROR=$(curl -fsS --max-time "$VLLM_CONNECT_TIMEOUT_SECS" "${LLM_URL}/models" -o /dev/null 2>&1); then
+        break
+    fi
+
+    VLLM_NOW=$(date +%s)
+    VLLM_REMAINING=$(( VLLM_DEADLINE - VLLM_NOW ))
+    if (( VLLM_REMAINING <= 0 )); then
+        echo "ERROR: vLLM not reachable at ${LLM_URL} after ${VLLM_ATTEMPT} attempts over ${VLLM_WAIT_TIMEOUT_SECS}s. Last error: ${VLLM_HEALTH_ERROR}" | tee -a "$LOG_FILE"
+        exit 1
+    fi
+
+    echo "vLLM not ready at ${LLM_URL} (attempt ${VLLM_ATTEMPT}; retrying in ${VLLM_RETRY_INTERVAL_SECS}s; ${VLLM_REMAINING}s remaining). Last error: ${VLLM_HEALTH_ERROR}" | tee -a "$LOG_FILE"
+    sleep "$VLLM_RETRY_INTERVAL_SECS"
+    VLLM_ATTEMPT=$((VLLM_ATTEMPT + 1))
+done
+
 echo "vLLM healthy at ${LLM_URL}" | tee -a "$LOG_FILE"
 
 cd /workspace/autoresearch
