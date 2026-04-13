@@ -35,13 +35,21 @@ echo "Tag:        $TAG" | tee -a "$LOG_FILE"
 echo "Batch size: $BATCH_SIZE" | tee -a "$LOG_FILE"
 echo "Profile:    $PROFILE" | tee -a "$LOG_FILE"
 echo "GPU:        $GPU" | tee -a "$LOG_FILE"
+echo "GCRM lease: ${GCRM_REQUEST_ID:-none (shell-script fallback)}" | tee -a "$LOG_FILE"
 echo "" | tee -a "$LOG_FILE"
 
-if ! bash "$RAG_RESERVATION_SCRIPT" cpu 2>&1 | tee -a "$LOG_FILE"; then
-    echo "ERROR: failed to reserve GPU for AutoResearch via $RAG_RESERVATION_SCRIPT" | tee -a "$LOG_FILE"
-    exit 1
+# GPU reservation: skip when the daemon scheduler already acquired a GCRM lease
+# (acquire_gpu_async already called the RAG reservation script in that path).
+# Fall back to the shell script only for direct/manual invocations without GCRM.
+if [[ -n "${GCRM_REQUEST_ID:-}" ]]; then
+    echo "GPU reservation: GCRM lease inherited (${GCRM_REQUEST_ID}), skipping redundant shell-script call" | tee -a "$LOG_FILE"
+else
+    if ! bash "$RAG_RESERVATION_SCRIPT" cpu 2>&1 | tee -a "$LOG_FILE"; then
+        echo "ERROR: failed to reserve GPU for AutoResearch via $RAG_RESERVATION_SCRIPT" | tee -a "$LOG_FILE"
+        exit 1
+    fi
+    echo "GPU reservation applied for AutoResearch (shell-script mode)" | tee -a "$LOG_FILE"
 fi
-echo "GPU reservation applied for AutoResearch" | tee -a "$LOG_FILE"
 
 # Verify vLLM is reachable before starting a potentially long batch
 LLM_URL="${LLM_URL:-http://crsai-vllm:8000/v1}"

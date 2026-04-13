@@ -53,6 +53,8 @@ RAG_RESERVATION_SCRIPT = os.getenv(
     "AUTORESEARCH_RAG_RESERVATION_SCRIPT",
     "/workspace/scripts/rag_gpu_reservation.sh",
 )
+# GCRM request ID passed from daemon scheduler (if GCRM lease was acquired)
+GCRM_REQUEST_ID: str | None = os.getenv("GCRM_REQUEST_ID", None)
 
 # ---------------------------------------------------------------------------
 # Persistent state
@@ -95,8 +97,35 @@ def log(msg: str) -> None:
     print(f"[{ts}] {msg}", flush=True)
 
 
-def reserve_gpu_for_ml() -> None:
-    """Force MCP-RAG to CPU before starting a GPU-bound AutoResearch run."""
+def reserve_gpu_for_ml() -> str | None:
+    """Acquire GPU for autoresearch — GCRM first, shell-script fallback.
+
+    Returns the GCRM request_id if a formal lease was acquired, or ``None``
+    if the legacy shell script was used.  When the daemon scheduler already
+    acquired a GCRM lease it passes the request_id via ``GCRM_REQUEST_ID``
+    env var — in that case we skip reservation entirely and return the id.
+    """
+    # If the daemon already holds a GCRM lease, reuse it
+    if GCRM_REQUEST_ID:
+        log(f"GCRM lease inherited from daemon scheduler: {GCRM_REQUEST_ID}")
+        return GCRM_REQUEST_ID
+
+    # Try the GCRM adapter (formal GPU lease)
+    try:
+        from gcrm_adapter import acquire_gpu  # noqa: PLC0415
+
+        request_id = acquire_gpu()
+        if request_id:
+            log(f"GCRM GPU lease acquired: {request_id}")
+            return request_id
+        log("GCRM fallback: shell-script reservation was used")
+        return None
+    except ImportError:
+        log("GCRM adapter not available — using legacy shell script")
+    except Exception as exc:
+        log(f"GCRM adapter error: {exc} — falling back to shell script")
+
+    # Legacy fallback
     proc = subprocess.run(
         ["bash", RAG_RESERVATION_SCRIPT, "cpu"],
         capture_output=True,
@@ -111,6 +140,21 @@ def reserve_gpu_for_ml() -> None:
         raise RuntimeError(
             f"GPU reservation failed via {RAG_RESERVATION_SCRIPT}: {output[-2000:]}"
         )
+    return None
+
+
+def release_gpu_for_ml(request_id: str | None) -> None:
+    """Release GCRM GPU lease if one was acquired."""
+    if request_id is None or request_id == GCRM_REQUEST_ID:
+        # Daemon-held lease — daemon releases it; or no GCRM lease at all
+        return
+    try:
+        from gcrm_adapter import release_gpu  # noqa: PLC0415
+
+        release_gpu(request_id)
+        log(f"GCRM GPU lease released: {request_id}")
+    except Exception as exc:
+        log(f"GCRM release failed (non-fatal): {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -403,10 +447,11 @@ def main():
     log(f"Consecutive failures carried over: {state['consecutive_failures']}")
 
     # ------------------------------------------------------------------
-    # Reserve GPU 1 for AutoResearch before any training starts
+    # Reserve GPU via GCRM (with shell-script fallback)
     # ------------------------------------------------------------------
+    gcrm_request_id: str | None = None
     try:
-        reserve_gpu_for_ml()
+        gcrm_request_id = reserve_gpu_for_ml()
     except Exception as exc:
         log(f"FATAL: {exc}")
         sys.exit(1)
@@ -564,6 +609,9 @@ def main():
     log(f"Best val_bpb: {best_val_bpb():.6f}")
     log(f"State persisted to: {STATE_FILE}")
     log(f"Results: {RESULTS_FILE}")
+
+    # Release GCRM lease if we acquired one locally
+    release_gpu_for_ml(gcrm_request_id)
 
 
 if __name__ == "__main__":
