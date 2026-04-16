@@ -80,7 +80,7 @@ class CausalSelfAttention(nn.Module):
         self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.ve_gate_channels = 32
+        self.ve_gate_channels = 128
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
 
     def forward(self, x, ve, cos_sin, window_size):
@@ -558,7 +558,9 @@ def get_lr_multiplier(progress):
         return cooldown * 1.0 + (1 - cooldown) * FINAL_LR_FRAC
 
 def get_muon_momentum(step):
-    frac = min(step / 300, 1)
+    # Warm up Muon momentum over first 5% of training steps (same as WARMUP_RATIO)
+    warmup_steps = int(0.05 * 300)  # 15 steps if total steps ~300, but we use relative progress
+    frac = min(step / warmup_steps, 1) if step < warmup_steps else 1.0
     return (1 - frac) * 0.85 + frac * 0.95
 
 def get_weight_decay(progress):

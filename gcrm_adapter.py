@@ -33,6 +33,11 @@ import subprocess
 import time
 from typing import Optional
 
+try:
+    from cotton.interfaces.compute import IGCRMClient as _IGCRMClient
+except ImportError:
+    _IGCRMClient = None  # type: ignore[assignment,misc]
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -58,7 +63,7 @@ _ESTIMATED_DURATION_SEC: int = int(os.getenv("AUTORESEARCH_ESTIMATED_DURATION_SE
 # ---------------------------------------------------------------------------
 
 async def acquire_gpu_async(
-    gcrm_client: Optional[object] = None,
+    gcrm_client: "Optional[_IGCRMClient]" = None,
     *,
     grant_timeout: float = GCRM_GRANT_TIMEOUT,
 ) -> Optional[str]:
@@ -105,8 +110,6 @@ async def acquire_gpu_async(
             _run_rag_reservation_script()
             return None
 
-    assert isinstance(gcrm_client, GCRMClient)
-
     req = ComputeRequest(
         agent_id="autoresearch-nightly",
         workload_type=WorkloadType.ML_TRAINING,
@@ -151,16 +154,14 @@ async def acquire_gpu_async(
 
 
 async def release_gpu_async(
-    gcrm_client: Optional[object] = None,
+    gcrm_client: "Optional[_IGCRMClient]" = None,
     request_id: Optional[str] = None,
 ) -> None:
     """Release the GCRM GPU lease after the nightly batch completes."""
     if request_id is None:
         return
     try:
-        from cotton.utils.gcrm.client import GCRMClient
-
-        if isinstance(gcrm_client, GCRMClient):
+        if gcrm_client is not None:
             await gcrm_client.release(request_id)
             logger.info("GCRM: autoresearch lease released request_id=%s", request_id)
     except Exception as exc:
