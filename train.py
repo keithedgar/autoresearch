@@ -566,7 +566,8 @@ def get_lr_multiplier(progress):
         return cooldown * 1.0 + (1 - cooldown) * FINAL_LR_FRAC
 
 def get_muon_momentum(step):
-    frac = min(step / 300, 1)
+    progress = min(step / (grad_accum_steps * (TIME_BUDGET / 10)), 1.0)  # approximate step progress
+    frac = min(progress / 0.05, 1.0)  # warmup over first 5% of steps
     return (1 - frac) * 0.85 + frac * 0.95
 
 def get_weight_decay(progress):
