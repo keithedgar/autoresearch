@@ -34,6 +34,7 @@ import shlex
 import subprocess
 import sys
 import time
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,6 +51,8 @@ RUN_LOG = "run.log"
 STATE_FILE = "state.json"
 DEFAULT_BATCH_SIZE = 12  # ~1 hour at 5 min/experiment
 MAX_CONSECUTIVE_FAILURES = 3
+MAX_PROPOSAL_RETRIES = int(os.getenv("AUTORESEARCH_MAX_PROPOSAL_RETRIES", "3"))
+RECENT_PROPOSAL_WINDOW = int(os.getenv("AUTORESEARCH_RECENT_PROPOSAL_WINDOW", "20"))
 RAG_RESERVATION_SCRIPT = os.getenv(
     "AUTORESEARCH_RAG_RESERVATION_SCRIPT",
     "/workspace/scripts/rag_gpu_reservation.sh",
@@ -249,6 +252,60 @@ def best_val_bpb() -> float | None:
     return best
 
 
+def _normalize_text(text: str) -> str:
+    """Normalize text for similarity/dedup checks."""
+    norm = re.sub(r"\s+", " ", text.lower()).strip()
+    return re.sub(r"[^a-z0-9\s]", "", norm)
+
+
+def _recent_descriptions(results_history: str, limit: int = RECENT_PROPOSAL_WINDOW) -> list[str]:
+    """Return recent non-empty experiment descriptions from results.tsv content."""
+    lines = [ln for ln in results_history.strip().splitlines() if ln.strip()]
+    if len(lines) <= 1:
+        return []
+    descs: list[str] = []
+    for line in reversed(lines[1:]):  # skip header, newest first
+        parts = line.split("\t")
+        if len(parts) >= 5:
+            desc = parts[4].strip()
+            if desc:
+                descs.append(desc)
+        if len(descs) >= limit:
+            break
+    return descs
+
+
+def _is_repeated_description(description: str, recent_descriptions: list[str], threshold: float = 0.90) -> bool:
+    """Detect duplicate/near-duplicate experiment ideas."""
+    cand = _normalize_text(description)
+    if not cand:
+        return True
+    for prev in recent_descriptions:
+        prev_norm = _normalize_text(prev)
+        if not prev_norm:
+            continue
+        if cand == prev_norm:
+            return True
+        if SequenceMatcher(None, cand, prev_norm).ratio() >= threshold:
+            return True
+    return False
+
+
+def _proposal_signature(description: str, replacements: list[dict]) -> str:
+    """Build a stable signature for proposal dedup within a single experiment step."""
+    payload = {
+        "description": _normalize_text(description),
+        "replacements": [
+            {
+                "old": _normalize_text(str(r.get("old", ""))),
+                "new": _normalize_text(str(r.get("new", ""))),
+            }
+            for r in replacements
+        ],
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
 # ---------------------------------------------------------------------------
 # LLM interaction
 # ---------------------------------------------------------------------------
@@ -332,8 +389,16 @@ def apply_replacements(train_py: str, replacements: list[dict]) -> str:
     return result
 
 
-def propose_experiment(train_py: str, results_history: str) -> dict:
+def propose_experiment(train_py: str, results_history: str, blocked_ideas: list[str] | None = None) -> dict:
     """Ask the LLM to propose a train.py modification."""
+    blocked_section = ""
+    if blocked_ideas:
+        blocked_lines = "\n".join(f"- {idea}" for idea in blocked_ideas)
+        blocked_section = (
+            "\nAvoid repeating ideas that were already tried recently:\n"
+            f"{blocked_lines}\n"
+        )
+
     user_msg = f"""Current train.py:
 ```python
 {train_py}
@@ -347,7 +412,8 @@ Experiment history (TSV):
 Current best val_bpb: {best_val_bpb() or 'no results yet — this is the first run'}
 
 Propose a single focused modification to improve val_bpb.
-Return search-and-replace pairs (exact text from the file) and a description."""
+Return search-and-replace pairs (exact text from the file) and a description.
+{blocked_section}"""
 
     response = call_llm(SYSTEM_PROMPT, user_msg, max_tokens=8192)
 
@@ -531,13 +597,36 @@ def main():
 
         # --- Propose ---
         try:
-            log("Querying LLM for proposal...")
-            proposal = propose_experiment(train_py, results_history)
-            description = proposal.get("description", "unknown modification")
-            replacements = proposal.get("replacements", [])
+            recent_desc = _recent_descriptions(results_history)
+            blocked = recent_desc[:8]
+            seen_signatures: set[str] = set()
+            proposal = None
+            description = ""
+            replacements: list[dict] = []
 
-            if not replacements:
-                log("LLM returned no replacements, skipping")
+            for attempt in range(1, MAX_PROPOSAL_RETRIES + 1):
+                log(f"Querying LLM for proposal (attempt {attempt}/{MAX_PROPOSAL_RETRIES})...")
+                proposal = propose_experiment(train_py, results_history, blocked_ideas=blocked)
+                description = proposal.get("description", "unknown modification")
+                replacements = proposal.get("replacements", [])
+
+                if not replacements:
+                    log("LLM returned no replacements, retrying")
+                    continue
+
+                sig = _proposal_signature(description, replacements)
+                if sig in seen_signatures:
+                    log("Duplicate proposal in this round, retrying")
+                    continue
+                seen_signatures.add(sig)
+
+                if _is_repeated_description(description, recent_desc):
+                    log("Proposal repeats recent idea, retrying")
+                    continue
+
+                break
+            else:
+                log("Could not obtain a novel proposal after retries, skipping experiment")
                 state["consecutive_failures"] += 1
                 save_state(state)
                 continue
