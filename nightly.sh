@@ -56,7 +56,19 @@ fi
 
 # Verify vLLM is reachable before starting a potentially long batch.
 # Give the service time to recover from brief restarts or model-load delays.
-LLM_URL="${LLM_URL:-http://crsai-vllm:8000/v1}"
+DEFAULT_LLM_URL="http://crsai-vllm:8000/v1"
+LLM_URL="${LLM_URL:-$DEFAULT_LLM_URL}"
+
+# Auto-correct common local/test endpoints inside containers.
+# In normal CRSAI runtime, vLLM is reachable via the Docker service name.
+if [[ "${AUTORESEARCH_ALLOW_LOCALHOST_LLM_URL:-false}" != "true" ]]; then
+    if [[ "$LLM_URL" =~ ^http://(127\.0\.0\.1|localhost)(:[0-9]+)?/v1$ ]]; then
+        echo "WARNING: LLM_URL=${LLM_URL} looks like a local/test endpoint; falling back to ${DEFAULT_LLM_URL}" | tee -a "$LOG_FILE"
+        LLM_URL="$DEFAULT_LLM_URL"
+    fi
+fi
+
+echo "LLM endpoint: ${LLM_URL}" | tee -a "$LOG_FILE"
 VLLM_DEADLINE=$(( $(date +%s) + VLLM_WAIT_TIMEOUT_SECS ))
 VLLM_ATTEMPT=1
 
