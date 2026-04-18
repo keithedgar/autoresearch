@@ -84,8 +84,23 @@ cd /workspace/autoresearch
 export AUTORESEARCH_PROFILE="$PROFILE"
 export CUDA_VISIBLE_DEVICES="$GPU"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:4096"
+export AUTORESEARCH_TRAIN_CMD="${AUTORESEARCH_TRAIN_CMD:-uv run train.py}"
 
-python3 -u orchestrator.py \
+if ! command -v uv >/dev/null 2>&1; then
+    echo "ERROR: uv is required for autoresearch nightly runs (missing from PATH)" | tee -a "$LOG_FILE"
+    exit 1
+fi
+
+TOKENIZER_PKL="${AUTORESEARCH_TOKENIZER_PKL:-$HOME/.cache/autoresearch/tokenizer/tokenizer.pkl}"
+if [[ ! -f "$TOKENIZER_PKL" ]]; then
+    echo "Tokenizer not found at $TOKENIZER_PKL; running one-time data/tokenizer prep" | tee -a "$LOG_FILE"
+    if ! uv run prepare.py 2>&1 | tee -a "$LOG_FILE"; then
+        echo "ERROR: prepare.py failed; cannot start autoresearch batch" | tee -a "$LOG_FILE"
+        exit 1
+    fi
+fi
+
+uv run python -u orchestrator.py \
     --tag "$TAG" \
     --batch-size "$BATCH_SIZE" \
     2>&1 | tee -a "$LOG_FILE"

@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -43,7 +44,7 @@ from pathlib import Path
 LLM_URL = os.getenv("LLM_URL", "http://crsai-vllm:8000/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "nemotron-cascade-2-nvfp4")
 MAX_EXPERIMENT_SECONDS = 600  # kill if > 10 min
-TRAIN_CMD = "python3 train.py"
+TRAIN_CMD = os.getenv("AUTORESEARCH_TRAIN_CMD", "python3 train.py")
 RESULTS_FILE = "results.tsv"
 RUN_LOG = "run.log"
 STATE_FILE = "state.json"
@@ -398,7 +399,7 @@ def run_experiment() -> dict:
     try:
         with open(RUN_LOG, "w") as log_file:
             proc = subprocess.run(
-                TRAIN_CMD.split(),
+                shlex.split(TRAIN_CMD),
                 stdout=log_file, stderr=subprocess.STDOUT,
                 timeout=MAX_EXPERIMENT_SECONDS,
                 env=env,

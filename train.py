@@ -24,13 +24,21 @@ from kernels import get_kernel
 cap = torch.cuda.get_device_capability()
 # FA3: Hopper-native (sm90), community fallback for Ada/Blackwell, PyTorch SDPA last resort
 _fa3_available = True
-try:
-    repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-    fa3 = get_kernel(repo).flash_attn_interface
-except Exception as _fa3_err:
-    print(f"[autoresearch] FA3 unavailable ({_fa3_err}), using PyTorch SDPA fallback")
+_force_fa3 = os.getenv("AUTORESEARCH_FORCE_FA3", "0") == "1"
+if cap != (9, 0) and not _force_fa3:
+    # On non-Hopper GPUs, some FA3 builds can hard-fail at runtime with
+    # "no kernel image is available" before Python can catch the exception.
+    print(f"[autoresearch] FA3 disabled for compute capability {cap}; using PyTorch SDPA fallback")
     _fa3_available = False
     fa3 = None
+else:
+    try:
+        repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
+        fa3 = get_kernel(repo).flash_attn_interface
+    except Exception as _fa3_err:
+        print(f"[autoresearch] FA3 unavailable ({_fa3_err}), using PyTorch SDPA fallback")
+        _fa3_available = False
+        fa3 = None
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
