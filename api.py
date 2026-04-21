@@ -80,7 +80,7 @@ def _read_results_json() -> list[dict]:
     rows = []
     for line in lines[1:]:
         parts = line.split("\t")
-        row = dict(zip(headers, parts))
+        row = dict(zip(headers, parts, strict=False))
         # Convert numeric fields
         for key in ("val_bpb", "memory_gb"):
             if key in row:
@@ -308,7 +308,7 @@ class AutoresearchHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    server = HTTPServer(("0.0.0.0", API_PORT), AutoresearchHandler)
+    server = HTTPServer(("0.0.0.0", API_PORT), AutoresearchHandler)  # noqa: S104
     print(f"Autoresearch API listening on :{API_PORT}", flush=True)
     try:
         server.serve_forever()

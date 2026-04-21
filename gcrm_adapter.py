@@ -66,7 +66,7 @@ async def acquire_gpu_async(
     gcrm_client: "Optional[_IGCRMClient]" = None,
     *,
     grant_timeout: float = GCRM_GRANT_TIMEOUT,
-) -> Optional[str]:
+) -> str | None:
     """Acquire a GCRM GPU lease for the autoresearch nightly batch.
 
     Args:
@@ -140,7 +140,7 @@ async def acquire_gpu_async(
         # embed device is managed separately
         _run_rag_reservation_script_nonblocking()
         return granted.request_id
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error(
             "GCRM: grant timeout after %.0fs for autoresearch — falling back to shell script",
             grant_timeout,
@@ -172,7 +172,7 @@ async def release_gpu_async(
 # Sync API (for orchestrator.py subprocess context)
 # ---------------------------------------------------------------------------
 
-def acquire_gpu() -> Optional[str]:
+def acquire_gpu() -> str | None:
     """Synchronous wrapper for ``acquire_gpu_async`` — for use in orchestrator.py.
 
     Returns the ``request_id`` or ``None`` if using the legacy fallback.
@@ -192,7 +192,7 @@ def acquire_gpu() -> Optional[str]:
         loop.close()
 
 
-def release_gpu(request_id: Optional[str] = None) -> None:
+def release_gpu(request_id: str | None = None) -> None:
     """Synchronous wrapper for ``release_gpu_async``."""
     if request_id is None:
         return

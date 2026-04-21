@@ -5,13 +5,14 @@ Usage: uv run train.py
 """
 
 import os
+
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:4096"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 import gc
 import math
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 import torch
 import torch.nn as nn
@@ -21,6 +22,7 @@ import torch.nn.functional as F
 torch.cuda.set_per_process_memory_fraction(0.3)
 
 from kernels import get_kernel
+
 cap = torch.cuda.get_device_capability()
 # FA3: Hopper-native (sm90), community fallback for Ada/Blackwell, PyTorch SDPA last resort
 _fa3_available = True
@@ -40,7 +42,7 @@ else:
         _fa3_available = False
         fa3 = None
 
-from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
+from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, evaluate_bpb, make_dataloader
 
 # ---------------------------------------------------------------------------
 # GPT Model
@@ -92,7 +94,7 @@ class CausalSelfAttention(nn.Module):
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
 
     def forward(self, x, ve, cos_sin, window_size):
-        B, T, C = x.size()
+        B, T, _C = x.size()
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
         v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
@@ -291,7 +293,7 @@ class GPT(nn.Module):
         return optimizer
 
     def forward(self, idx, targets=None, reduction='mean'):
-        B, T = idx.size()
+        _B, T = idx.size()
         assert T <= self.cos.size(1)
         cos_sin = self.cos[:, :T], self.sin[:, :T]
 
@@ -487,7 +489,7 @@ if _PROFILE == "rtx5060":
     TOTAL_BATCH_SIZE   = 2**16
     DEVICE_BATCH_SIZE  = 16
     WARMUP_RATIO       = 0.05
-    print(f"[autoresearch] Applied profile: rtx5060 (8 GB VRAM)")
+    print("[autoresearch] Applied profile: rtx5060 (8 GB VRAM)")
 elif _PROFILE and _PROFILE != "default":
     print(f"[autoresearch] WARNING: Unknown profile '{_PROFILE}', using defaults")
 
@@ -585,7 +587,7 @@ step = 0
 while True:
     torch.cuda.synchronize()
     t0 = time.time()
-    for micro_step in range(grad_accum_steps):
+    for _micro_step in range(grad_accum_steps):
         with autocast_ctx:
             loss = model(x, y)
         train_loss = loss.detach()

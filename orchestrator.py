@@ -35,7 +35,7 @@ import subprocess
 import sys
 import time
 from difflib import SequenceMatcher
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -97,7 +97,7 @@ def save_state(state: dict) -> None:
 
 def log(msg: str) -> None:
     """Timestamped log line."""
-    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    ts = datetime.now(UTC).strftime("%H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
 
@@ -116,7 +116,7 @@ def reserve_gpu_for_ml() -> str | None:
 
     # Try the GCRM adapter (formal GPU lease)
     try:
-        from gcrm_adapter import acquire_gpu  # noqa: PLC0415
+        from gcrm_adapter import acquire_gpu
 
         request_id = acquire_gpu()
         if request_id:
@@ -153,7 +153,7 @@ def release_gpu_for_ml(request_id: str | None) -> None:
         # Daemon-held lease — daemon releases it; or no GCRM lease at all
         return
     try:
-        from gcrm_adapter import release_gpu  # noqa: PLC0415
+        from gcrm_adapter import release_gpu
 
         release_gpu(request_id)
         log(f"GCRM GPU lease released: {request_id}")
@@ -168,7 +168,7 @@ def release_gpu_for_ml(request_id: str | None) -> None:
 
 def run(cmd: str, timeout: int | None = None, cwd: str | None = None) -> subprocess.CompletedProcess:
     """Run a shell command, return CompletedProcess."""
-    return subprocess.run(
+    return subprocess.run(  # noqa: S602
         cmd, shell=True, capture_output=True, text=True,
         timeout=timeout, cwd=cwd,
     )
@@ -496,7 +496,7 @@ def main():
     # ------------------------------------------------------------------
     state = load_state()
     branch = f"autoresearch/{args.tag}"
-    run_start = datetime.now(timezone.utc).isoformat()
+    run_start = datetime.now(UTC).isoformat()
 
     # If tag changed, reset state for the new research track
     if state["tag"] != args.tag:
