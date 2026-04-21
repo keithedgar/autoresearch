@@ -22,13 +22,12 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 import requests
-
-from research_director import ResearchDirector
 from report import ReportGenerator
+from research_director import ResearchDirector
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -100,7 +99,7 @@ def _trace_cycle(round_num: int, tag: str, status: dict, results: list, action: 
 
 
 def log(msg: str):
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
 
@@ -126,7 +125,7 @@ def api_post(path: str, body: dict | None = None) -> dict | None:
 
 def generate_tag(round_num: int) -> str:
     """Generate a unique tag for each round: apr09-r1, apr09-r2, ..."""
-    date_part = datetime.now(timezone.utc).strftime("%b%d").lower()
+    date_part = datetime.now(UTC).strftime("%b%d").lower()
     return f"{date_part}-r{round_num}"
 
 
@@ -224,7 +223,7 @@ def run_supervisor(batch_size: int = 12, plateau_threshold: int = PLATEAU_THRESH
         # Mid-run plateau check
         mid_results = api_get("/results") or []
         if detect_plateau(mid_results, plateau_threshold):
-            log(f"PLATEAU mid-batch. Stopping.")
+            log("PLATEAU mid-batch. Stopping.")
             api_post("/stop")
             time.sleep(30)
             break
@@ -254,7 +253,7 @@ def _consult_director(director: ResearchDirector, round_num: int) -> dict | None
             log("Director: no train.py found, skipping directive")
             return None
 
-        log(f"Director: analyzing history and deciding next experiment...")
+        log("Director: analyzing history and deciding next experiment...")
         directive = director.next_directive(train_py, results_tsv)
 
         log(f"Director directive: [{directive.get('category')}] "

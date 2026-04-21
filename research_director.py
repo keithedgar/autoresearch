@@ -180,7 +180,7 @@ class DomainScan:
 def _run(cmd: str, cwd: str | None = None, timeout: int = 30) -> str:
     """Run a shell command, return stdout."""
     try:
-        r = subprocess.run(
+        r = subprocess.run(  # noqa: S602
             cmd, shell=True, capture_output=True, text=True,
             timeout=timeout, cwd=cwd,
         )
