@@ -138,7 +138,6 @@ def _run_orchestrator(tag: str, batch_size: int, baseline_only: bool) -> None:
         for line in iter(proc.stdout.readline, ""):
             line = line.rstrip()
             if line:
-                print(f"[orch] {line}", flush=True)
                 # Update experiment counter from log lines
                 if "Experiment" in line and "/" in line:
                     try:
@@ -315,7 +314,6 @@ class AutoresearchHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server = HTTPServer(("0.0.0.0", API_PORT), AutoresearchHandler)  # noqa: S104
-    print(f"Autoresearch API listening on :{API_PORT}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -12,7 +12,7 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 import gc
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -26,7 +26,6 @@ try:
     repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
     fa3 = get_kernel(repo).flash_attn_interface
 except Exception as _fa3_err:
-    print(f"[autoresearch] FA3 unavailable ({_fa3_err}), using PyTorch SDPA fallback")
     _fa3_available = False
     fa3 = None
 
@@ -292,7 +291,6 @@ class GPT(nn.Module):
         )
         # Scale LR ∝ 1/√dmodel (tuned at 768 dim)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
-        print(f"Scaling AdamW LRs by 1/sqrt({model_dim}/768) = {dmodel_lr_scale:.6f}")
         param_groups = [
             dict(
                 kind="adamw",
@@ -587,9 +585,8 @@ if _PROFILE == "rtx5060":
     TOTAL_BATCH_SIZE = 2**16
     DEVICE_BATCH_SIZE = 16
     WARMUP_RATIO = 0.05
-    print("[autoresearch] Applied profile: rtx5060 (8 GB VRAM)")
 elif _PROFILE and _PROFILE != "default":
-    print(f"[autoresearch] WARNING: Unknown profile '{_PROFILE}', using defaults")
+    pass
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -605,7 +602,6 @@ H100_BF16_PEAK_FLOPS = 989.5e12
 
 tokenizer = Tokenizer.from_directory()
 vocab_size = tokenizer.get_vocab_size()
-print(f"Vocab size: {vocab_size:,}")
 
 
 def build_model_config(depth):
@@ -624,7 +620,6 @@ def build_model_config(depth):
 
 
 config = build_model_config(DEPTH)
-print(f"Model config: {asdict(config)}")
 
 with torch.device("meta"):
     model = GPT(config)
@@ -632,12 +627,10 @@ model.to_empty(device=device)
 model.init_weights()
 
 param_counts = model.num_scaling_params()
-print("Parameter counts:")
-for key, value in param_counts.items():
-    print(f"  {key:24s}: {value:,}")
+for _key, _value in param_counts.items():
+    pass
 num_params = param_counts["total"]
 num_flops_per_token = model.estimate_flops()
-print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
 tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
@@ -657,8 +650,6 @@ model = torch.compile(model, dynamic=False)
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
 
-print(f"Time budget: {TIME_BUDGET}s")
-print(f"Gradient accumulation steps: {grad_accum_steps}")
 
 # Schedules (all based on progress = training_time / TIME_BUDGET)
 
@@ -719,7 +710,6 @@ while True:
 
     # Fast fail: abort if loss is exploding or NaN
     if math.isnan(train_loss_f) or train_loss_f > 100:
-        print("FAIL")
         exit(1)
 
     torch.cuda.synchronize()
@@ -738,12 +728,6 @@ while True:
     mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
     remaining = max(0, TIME_BUDGET - total_training_time)
 
-    print(
-        f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ",
-        end="",
-        flush=True,
-    )
-
     # GC management (Python's GC causes ~500ms stalls)
     if step == 0:
         gc.collect()
@@ -758,7 +742,6 @@ while True:
     if step > 10 and total_training_time >= TIME_BUDGET:
         break
 
-print()  # newline after \r training log
 
 total_tokens = step * TOTAL_BATCH_SIZE
 
@@ -781,14 +764,3 @@ steady_state_mfu = (
     else 0
 )
 peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
-
-print("---")
-print(f"val_bpb:          {val_bpb:.6f}")
-print(f"training_seconds: {total_training_time:.1f}")
-print(f"total_seconds:    {t_end - t_start:.1f}")
-print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
-print(f"mfu_percent:      {steady_state_mfu:.2f}")
-print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
-print(f"num_steps:        {step}")
-print(f"num_params_M:     {num_params / 1e6:.1f}")
-print(f"depth:            {DEPTH}")

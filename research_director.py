@@ -37,7 +37,6 @@ log = logging.getLogger(__name__)
 LLM_URL = os.getenv("LLM_URL", "http://crsai-vllm:8000/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "nemotron-cascade-2-nvfp4")
 WORKSPACE_ROOT = Path(os.getenv("CRSAI_WORKSPACE_ROOT", "/workspace"))
-AIQ_ROOT = Path(os.getenv("AIQ_WORKSPACE_ROOT", "/workspace-aiq"))
 
 _LLM_RETRIES = int(os.getenv("RESEARCH_DIRECTOR_LLM_RETRIES", "3"))
 _LLM_RETRY_DELAY = float(os.getenv("RESEARCH_DIRECTOR_LLM_RETRY_DELAY", "5.0"))
@@ -136,33 +135,6 @@ DOMAINS: dict[str, dict] = {
             "experiment plan completeness",
             "forecast accuracy (MAPE, RMSE)",
         ],
-    },
-    "aiq_agents": {
-        "description": "AIQ research agents: deep researcher, chat researcher, clarifier, intent classification",
-        "paths": [],
-        "aiq_paths": [
-            "src/aiq_agent/agents/deep_researcher/",
-            "src/aiq_agent/agents/chat_researcher/",
-            "src/aiq_agent/agents/clarifier/",
-        ],
-        "test_paths": [],
-        "aiq_test_paths": [
-            "tests/aiq_agent/agents/deep_researcher/test_agent.py",
-            "tests/aiq_agent/agents/deep_researcher/test_custom_middleware.py",
-        ],
-        "metrics": [
-            "intent classification accuracy",
-            "research depth quality",
-            "citation accuracy",
-        ],
-    },
-    "knowledge_layer": {
-        "description": "Document ingestion, PDF extraction, embedding pipeline, Qdrant vector store",
-        "paths": [],
-        "aiq_paths": ["sources/knowledge_layer/"],
-        "test_paths": [],
-        "aiq_test_paths": ["tests/knowledge_layer_tests/test_summary_store.py"],
-        "metrics": ["ingestion success rate", "retrieval relevance", "embedding quality"],
     },
     "infrastructure": {
         "description": "Container orchestration, DB migrations, Prometheus/Grafana, Loki logging",
@@ -298,21 +270,16 @@ def scan_domain(domain_id: str, config: dict) -> DomainScan:
     )
 
     paths = config.get("paths", [])
-    aiq_paths = config.get("aiq_paths", [])
-    scan.file_count = _count_files(WORKSPACE_ROOT, paths) + _count_files(AIQ_ROOT, aiq_paths)
+    scan.file_count = _count_files(WORKSPACE_ROOT, paths)
 
     test_paths = config.get("test_paths", [])
-    aiq_test_paths = config.get("aiq_test_paths", [])
-    scan.test_count = _count_test_files(WORKSPACE_ROOT, test_paths) + _count_test_files(
-        AIQ_ROOT, aiq_test_paths
-    )
+    scan.test_count = _count_test_files(WORKSPACE_ROOT, test_paths)
     scan.has_tests = scan.test_count > 0
     scan.test_coverage_gap = scan.file_count > 0 and not scan.has_tests
 
     changes_main, files_main = _recent_git_changes(WORKSPACE_ROOT, paths)
-    changes_aiq, files_aiq = _recent_git_changes(AIQ_ROOT, aiq_paths)
-    scan.recent_changes = changes_main + changes_aiq
-    scan.recent_change_files = files_main + files_aiq
+    scan.recent_changes = changes_main
+    scan.recent_change_files = files_main
 
     return scan
 

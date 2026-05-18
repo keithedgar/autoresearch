@@ -39,12 +39,13 @@ RUN_LOG = "run.log"
 
 
 def run(
-    cmd: str, timeout: int | None = None, cwd: str | None = None
+    cmd: str | list[str], timeout: int | None = None, cwd: str | None = None
 ) -> subprocess.CompletedProcess:
     """Run a shell command, return CompletedProcess."""
+    shell = isinstance(cmd, str)
     return subprocess.run(
         cmd,
-        shell=True,
+        shell=shell,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -244,7 +245,6 @@ Return search-and-replace pairs (exact text from the file) and a description."""
 
 def run_experiment() -> dict:
     """Run train.py and return parsed results."""
-    print(f"  Running training ({MAX_EXPERIMENT_SECONDS}s timeout)...", flush=True)
     t0 = time.time()
 
     env = os.environ.copy()
@@ -262,11 +262,9 @@ def run_experiment() -> dict:
                 env=env,
             )
     except subprocess.TimeoutExpired:
-        print("  TIMEOUT — experiment killed", flush=True)
         return {"val_bpb": None, "peak_vram_mb": None, "crashed": True}
 
-    elapsed = time.time() - t0
-    print(f"  Finished in {elapsed:.0f}s", flush=True)
+    time.time() - t0
 
     return parse_run_log()
 
@@ -283,40 +281,29 @@ def main():
     args = parser.parse_args()
 
     branch = f"autoresearch/{args.tag}"
-    print("=== Autoresearch Orchestrator ===", flush=True)
-    print(f"Branch: {branch}", flush=True)
-    print(f"LLM: {LLM_URL} / {LLM_MODEL}", flush=True)
-    print(f"Profile: {os.getenv('AUTORESEARCH_PROFILE', 'default')}", flush=True)
-    print(flush=True)
 
     # Setup branch
     r = run(f"git rev-parse --verify {branch}")
     if r.returncode != 0:
         run(f"git checkout -b {branch}")
-        print(f"Created branch: {branch}", flush=True)
     else:
         run(f"git checkout {branch}")
-        print(f"Checked out existing branch: {branch}", flush=True)
 
     init_results_tsv()
 
     # Baseline run
     if best_val_bpb() is None:
-        print("\n--- Baseline Run ---", flush=True)
         result = run_experiment()
         commit = git_short_hash()
         if result["crashed"]:
-            print("  BASELINE CRASHED — check run.log", flush=True)
             append_result(commit, 0.0, 0.0, "crash", "baseline")
             sys.exit(1)
 
         bpb = result["val_bpb"]
         mem = result["peak_vram_mb"] / 1024 if result["peak_vram_mb"] else 0
         append_result(commit, bpb, mem, "keep", "baseline")
-        print(f"  Baseline: val_bpb={bpb:.6f}, memory={mem:.1f}GB", flush=True)
 
     if args.baseline_only:
-        print("\nBaseline complete. Exiting.", flush=True)
         return
 
     # Experiment loop
@@ -326,17 +313,12 @@ def main():
     while True:
         experiment_num += 1
         if args.max_experiments and experiment_num > args.max_experiments:
-            print(f"\nReached max experiments ({args.max_experiments}). Stopping.", flush=True)
             break
 
         if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-            print(f"\n{MAX_CONSECUTIVE_FAILURES} consecutive LLM failures. Stopping.", flush=True)
             break
 
         current_best = best_val_bpb()
-        print(
-            f"\n--- Experiment {experiment_num} (best so far: {current_best:.6f}) ---", flush=True
-        )
 
         # Get current state
         train_py = read_train_py()
@@ -344,20 +326,14 @@ def main():
 
         # Ask LLM for proposal
         try:
-            print("  Querying LLM for proposal...", flush=True)
             proposal = propose_experiment(train_py, results_history)
             description = proposal.get("description", "unknown modification")
             replacements = proposal.get("replacements", [])
 
             if not replacements:
-                print("  LLM returned no replacements, skipping", flush=True)
                 continue
 
-            print(f"  Proposal: {description}", flush=True)
-            print(f"  Replacements: {len(replacements)}", flush=True)
-        except Exception as e:
-            print(f"  LLM error: {e}", flush=True)
-            print("  Retrying in 30s...", flush=True)
+        except Exception:
             consecutive_failures += 1
             time.sleep(30)
             continue
@@ -366,8 +342,7 @@ def main():
         try:
             new_train_py = apply_replacements(train_py, replacements)
             write_train_py(new_train_py)
-        except ValueError as e:
-            print(f"  Replacement failed: {e}", flush=True)
+        except ValueError:
             consecutive_failures += 1
             continue
 
@@ -380,7 +355,6 @@ def main():
         if result["crashed"]:
             mem = 0.0
             append_result(commit, 0.0, mem, "crash", description)
-            print("  CRASHED — reverting", flush=True)
             git_reset_hard()
             continue
 
@@ -389,19 +363,13 @@ def main():
 
         if bpb < current_best:
             append_result(commit, bpb, mem, "keep", description)
-            improvement = current_best - bpb
-            print(f"  KEEP — val_bpb={bpb:.6f} (improved by {improvement:.6f})", flush=True)
+            current_best - bpb
         else:
             append_result(commit, bpb, mem, "discard", description)
-            regression = bpb - current_best
-            print(f"  DISCARD — val_bpb={bpb:.6f} (worse by {regression:.6f})", flush=True)
+            bpb - current_best
             git_reset_hard()
 
     # Summary
-    print("\n=== Summary ===", flush=True)
-    print(f"Total experiments: {experiment_num}", flush=True)
-    print(f"Best val_bpb: {best_val_bpb():.6f}", flush=True)
-    print(f"Results: {RESULTS_FILE}", flush=True)
 
 
 if __name__ == "__main__":

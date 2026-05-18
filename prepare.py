@@ -74,16 +74,14 @@ def download_single_shard(index):
                     if chunk:
                         f.write(chunk)
             os.rename(temp_path, filepath)
-            print(f"  Downloaded {filename}")
             return True
-        except (OSError, requests.RequestException) as e:
-            print(f"  Attempt {attempt}/{max_attempts} failed for {filename}: {e}")
+        except (OSError, requests.RequestException):
             for path in [filepath + ".tmp", filepath]:
                 if os.path.exists(path):
                     try:
                         os.remove(path)
-                    except OSError as remove_err:
-                        print(f"  Warning: could not remove {path}: {remove_err}")
+                    except OSError:
+                        pass
             if attempt < max_attempts:
                 time.sleep(2**attempt)
     return False
@@ -102,18 +100,15 @@ def download_data(num_shards, download_workers=8):
         1 for i in ids if os.path.exists(os.path.join(DATA_DIR, f"shard_{i:05d}.parquet"))
     )
     if existing == len(ids):
-        print(f"Data: all {len(ids)} shards already downloaded at {DATA_DIR}")
         return
 
     needed = len(ids) - existing
-    print(f"Data: downloading {needed} shards ({existing} already exist)...")
 
     workers = max(1, min(download_workers, needed))
     with Pool(processes=workers) as pool:
         results = pool.map(download_single_shard, ids)
 
-    ok = sum(1 for r in results if r)
-    print(f"Data: {ok}/{len(ids)} shards ready at {DATA_DIR}")
+    sum(1 for r in results if r)
 
 
 # ---------------------------------------------------------------------------
@@ -151,19 +146,16 @@ def train_tokenizer():
     token_bytes_path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
 
     if os.path.exists(tokenizer_pkl) and os.path.exists(token_bytes_path):
-        print(f"Tokenizer: already trained at {TOKENIZER_DIR}")
         return
 
     os.makedirs(TOKENIZER_DIR, exist_ok=True)
 
     parquet_files = list_parquet_files()
     if len(parquet_files) < 2:
-        print("Tokenizer: need at least 2 data shards (1 train + 1 val). Download more data first.")
         sys.exit(1)
 
     # --- Train with rustbpe ---
-    print("Tokenizer: training BPE tokenizer...")
-    t0 = time.time()
+    time.time()
 
     tokenizer = rustbpe.Tokenizer()
     vocab_size_no_special = VOCAB_SIZE - len(SPECIAL_TOKENS)
@@ -185,11 +177,9 @@ def train_tokenizer():
     with open(tokenizer_pkl, "wb") as f:
         pickle.dump(enc, f)
 
-    t1 = time.time()
-    print(f"Tokenizer: trained in {t1 - t0:.1f}s, saved to {tokenizer_pkl}")
+    time.time()
 
     # --- Build token_bytes lookup for BPB evaluation ---
-    print("Tokenizer: building token_bytes lookup...")
     special_set = set(SPECIAL_TOKENS)
     token_bytes_list = []
     for token_id in range(enc.n_vocab):
@@ -200,14 +190,12 @@ def train_tokenizer():
             token_bytes_list.append(len(token_str.encode("utf-8")))
     token_bytes_tensor = torch.tensor(token_bytes_list, dtype=torch.int32)
     torch.save(token_bytes_tensor, token_bytes_path)
-    print(f"Tokenizer: saved token_bytes to {token_bytes_path}")
 
     # Sanity check
     test = "Hello world! Numbers: 123. Unicode: 你好"
     encoded = enc.encode_ordinary(test)
     decoded = enc.decode(encoded)
     assert decoded == test, f"Tokenizer roundtrip failed: {test!r} -> {decoded!r}"
-    print(f"Tokenizer: sanity check passed (vocab_size={enc.n_vocab})")
 
 
 # ---------------------------------------------------------------------------
@@ -399,14 +387,8 @@ if __name__ == "__main__":
 
     num_shards = MAX_SHARD if args.num_shards == -1 else args.num_shards
 
-    print(f"Cache directory: {CACHE_DIR}")
-    print()
-
     # Step 1: Download data
     download_data(num_shards, download_workers=args.download_workers)
-    print()
 
     # Step 2: Train tokenizer
     train_tokenizer()
-    print()
-    print("Done! Ready to train.")

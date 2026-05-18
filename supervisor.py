@@ -100,8 +100,7 @@ def _trace_cycle(round_num: int, tag: str, status: dict, results: list, action: 
 
 
 def log(msg: str):
-    ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def api_get(path: str) -> dict | list | None:
