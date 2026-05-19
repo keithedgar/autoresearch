@@ -1,7 +1,7 @@
 """
 Autoresearch Orchestrator — drives autonomous experiment loops via local LLM.
 
-Calls the local Nemotron model (via vLLM) to propose train.py modifications,
+Calls the local LLM model (via vLLM) to propose train.py modifications,
 runs experiments, tracks results, and keeps/discards changes via git.
 
 Usage:
