@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field, field_validator
 log = logging.getLogger(__name__)
 
 LLM_URL = os.getenv("LLM_URL", "http://crsai-vllm:8000/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "qwq-32b-q4")
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen3-coder-30b-a3b-awq")
 WORKSPACE_ROOT = Path(os.getenv("CRSAI_WORKSPACE_ROOT", "/workspace"))
 
 _LLM_RETRIES = int(os.getenv("RESEARCH_DIRECTOR_LLM_RETRIES", "3"))
